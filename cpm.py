@@ -19,6 +19,14 @@ REQUIRED_COLUMNS = (
     "task_type",
 )
 
+OPTIONAL_TRACKING_COLUMNS = (
+    "baseline_start",
+    "baseline_finish",
+    "actual_start",
+    "actual_finish",
+    "progress_pct",
+)
+
 
 def parse_dependencies(raw: Any) -> list[Hashable]:
     """Parse dependency cell into a list of predecessor task ids."""
@@ -178,3 +186,67 @@ def build_feature_frame(df: pd.DataFrame, cpm_df: pd.DataFrame) -> pd.DataFrame:
         how="left",
     )
     return merged
+
+
+def add_tracking_metrics(df: pd.DataFrame, cpm_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add baseline-vs-actual schedule tracking columns.
+
+    Falls back to CPM ES/EF when baseline fields are absent, so existing CSVs still work.
+    Time units are numeric (project day / week unit, not datetime).
+    """
+    out = cpm_df[["task_id", "ES", "EF"]].merge(
+        df,
+        on="task_id",
+        how="left",
+    )
+
+    for col in OPTIONAL_TRACKING_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    out["baseline_start"] = pd.to_numeric(out["baseline_start"], errors="coerce")
+    out["baseline_finish"] = pd.to_numeric(out["baseline_finish"], errors="coerce")
+    out["actual_start"] = pd.to_numeric(out["actual_start"], errors="coerce")
+    out["actual_finish"] = pd.to_numeric(out["actual_finish"], errors="coerce")
+    out["progress_pct"] = pd.to_numeric(out["progress_pct"], errors="coerce")
+
+    # baseline fallback = deterministic CPM plan
+    out["baseline_start"] = out["baseline_start"].fillna(out["ES"])
+    out["baseline_finish"] = out["baseline_finish"].fillna(out["EF"])
+
+    # derive missing actuals conservatively
+    out["actual_start"] = out["actual_start"].fillna(out["baseline_start"])
+
+    inferred_actual_finish = out["actual_start"] + out["duration"].astype(float)
+    out["actual_finish"] = out["actual_finish"].fillna(inferred_actual_finish)
+
+    out["progress_pct"] = out["progress_pct"].clip(lower=0, upper=100)
+
+    out["start_variance"] = (out["actual_start"] - out["baseline_start"]).round(3)
+    out["finish_variance"] = (out["actual_finish"] - out["baseline_finish"]).round(3)
+    out["is_delayed_vs_baseline"] = out["finish_variance"] > 0
+    return out
+
+
+def tracking_summary(tracked_df: pd.DataFrame) -> dict[str, float]:
+    """Aggregate baseline vs actual schedule KPIs."""
+    if tracked_df.empty:
+        return {
+            "planned_completion": 0.0,
+            "actual_completion": 0.0,
+            "project_delay": 0.0,
+            "tasks_delayed_pct": 0.0,
+        }
+
+    planned_completion = float(tracked_df["baseline_finish"].max())
+    actual_completion = float(tracked_df["actual_finish"].max())
+    project_delay = actual_completion - planned_completion
+    delayed_pct = float(tracked_df["is_delayed_vs_baseline"].mean() * 100)
+
+    return {
+        "planned_completion": round(planned_completion, 3),
+        "actual_completion": round(actual_completion, 3),
+        "project_delay": round(project_delay, 3),
+        "tasks_delayed_pct": round(delayed_pct, 2),
+    }
