@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from typing import Any, Hashable
 
+import networkx as nx
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -39,6 +40,93 @@ def risk_tier_color(tier: str) -> str:
     if tier == "LOW":
         return "#27ae60"
     return "#7f8c8d"
+
+
+def plot_dependency_graph(g: nx.DiGraph, df: pd.DataFrame, cpm_df: pd.DataFrame) -> go.Figure:
+    """
+    Spring-layout DAG: nodes are tasks, edges are dependencies; critical tasks highlighted.
+    """
+    if g.number_of_nodes() == 0:
+        fig = go.Figure()
+        fig.update_layout(title="No tasks to display", height=240)
+        return fig
+
+    name_by_id = df.set_index("task_id")["task_name"].astype(str).to_dict()
+    crit = set(cpm_df.loc[cpm_df["is_critical"], "task_id"].tolist())
+
+    sub = g.subgraph(df["task_id"].tolist()).copy()
+    pos = nx.spring_layout(sub, seed=42, k=2.0 / max(1, math.sqrt(sub.number_of_nodes())))
+
+    edge_x: list[float | None] = []
+    edge_y: list[float | None] = []
+    for u, v in sub.edges():
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        edge_x += [float(x0), float(x1), None]
+        edge_y += [float(y0), float(y1), None]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            mode="lines",
+            line=dict(width=1.5, color="#bdc3c7"),
+            hoverinfo="none",
+            showlegend=False,
+        )
+    )
+
+    nodes = list(sub.nodes())
+    node_x = [float(pos[n][0]) for n in nodes]
+    node_y = [float(pos[n][1]) for n in nodes]
+    labels = [str(name_by_id.get(n, n))[:40] for n in nodes]
+    hover = [f"id={n}<br>{name_by_id.get(n, '')}" for n in nodes]
+    colors = ["#c0392b" if n in crit else "#2980b9" for n in nodes]
+
+    fig.add_trace(
+        go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            text=labels,
+            textposition="top center",
+            textfont=dict(size=11),
+            marker=dict(size=16, color=colors, line=dict(width=1, color="#2c3e50")),
+            hovertext=hover,
+            hoverinfo="text",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="markers",
+            marker=dict(size=12, color="#c0392b"),
+            name="Critical",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="markers",
+            marker=dict(size=12, color="#2980b9"),
+            name="Non-critical",
+        )
+    )
+
+    fig.update_xaxes(showgrid=False, zeroline=False, showticklabels=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, showticklabels=False)
+    fig.update_layout(
+        title="Task dependency graph",
+        height=max(380, 52 * sub.number_of_nodes()),
+        margin=dict(l=8, r=8, t=48, b=8),
+        plot_bgcolor="#f8f9fa",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
 
 
 def plot_gantt(
