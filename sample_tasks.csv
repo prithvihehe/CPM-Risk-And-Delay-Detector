@@ -1,5 +1,5 @@
-task_id,task_name,duration,dependencies,resource_count,task_type
-1,Design,3,,1,dev
-2,Build,5,1,3,dev
-3,Test,2,2,2,qa
-4,Deploy,1,"2,3",1,ops
+task_id,task_name,duration,dependencies,resource_count,task_type,baseline_start,baseline_finish,actual_start,actual_finish,progress_pct,optimistic_duration,most_likely_duration,pessimistic_duration
+1,Design,3,,1,dev,0,3,0,3.5,100,2,3,4
+2,Build,5,1,3,dev,3,8,3.5,9,85,4,5,8
+3,Test,2,1,2,qa,8,10,9.2,11,60,1.5,2,3.5
+4,Deploy,1,"2,3",1,ops,10,11,11.2,12,20,0.8,1,2

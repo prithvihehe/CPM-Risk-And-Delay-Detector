@@ -5,6 +5,7 @@ Streamlit UI: CSV upload, CPM analysis, risk scoring, and high-risk highlights.
 from __future__ import annotations
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from cpm import (
@@ -15,6 +16,13 @@ from cpm import (
     critical_path_task_ids,
     validate_dependency_references,
 )
+from pert import compute_pert_schedule
+from resource_leveling import (
+    level_resources,
+    leveling_summary,
+    smooth_resources,
+    smoothing_summary,
+)
 from ai.explain import (
     explain_task,
     format_reasons_line,
@@ -23,7 +31,14 @@ from ai.explain import (
 )
 from ai.predict import DelayPredictor
 from risk import add_risk_scores, high_risk_mask
-from visuals import plot_explanation, plot_gantt, plot_risk, risk_tier
+from visuals import (
+    plot_aon,
+    plot_explanation,
+    plot_gantt,
+    plot_resource_leveling_square_flow,
+    plot_risk,
+    risk_tier,
+)
 
 AI_FEATURES = ["duration", "resource_count", "is_critical", "slack"]
 
@@ -58,10 +73,15 @@ def main() -> None:
     st.caption(
         "Upload a CSV with columns: "
         + ", ".join(REQUIRED_COLUMNS)
+        + " | Optional: "
+        + ", ".join(["optimistic_duration", "most_likely_duration", "pessimistic_duration"])
     )
 
     uploaded = st.file_uploader("CSV file", type=["csv"])
     threshold = st.slider("High-risk threshold (risk score)", 0.0, 2.0, 1.0, 0.1)
+    time_unit = st.sidebar.selectbox("Time unit", ["days", "weeks", "months"], index=0)
+    default_capacity = 1
+
 
     if uploaded is None:
         st.info("Upload a CSV to begin.")
@@ -157,7 +177,7 @@ def main() -> None:
     st.subheader("CPM results")
     c1, c2 = st.columns(2)
     with c1:
-        st.metric("Project completion (max EF)", f"{cpm_df['EF'].max():.2f}")
+        st.metric("Project completion (max EF)", f"{cpm_df['EF'].max():.2f} {time_unit}")
     with c2:
         st.write("**Critical path (ordered):**")
         st.write(" → ".join(str(x) for x in cp_path) if cp_path else "(none)")
@@ -166,6 +186,157 @@ def main() -> None:
         cpm_df.merge(df[["task_id", "task_name"]], on="task_id", how="left"),
         use_container_width=True,
     )
+
+    st.subheader("AON dependency diagram")
+    st.plotly_chart(plot_aon(df, g, cpm_df), use_container_width=True)
+
+    st.subheader("PERT schedule")
+    pert_input, pert_cpm = compute_pert_schedule(df)
+    pert_completion = float(pert_cpm["EF"].max())
+    pert_merged = pert_input.merge(pert_cpm[["task_id", "is_critical"]], on="task_id", how="left")
+    project_variance = float(pert_merged.loc[pert_merged["is_critical"], "pert_variance"].sum())
+    project_sigma = project_variance ** 0.5
+    approx_p80 = pert_completion + 0.8416 * project_sigma
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.metric("PERT expected completion", f"{pert_completion:.2f} {time_unit}")
+    with p2:
+        st.metric("PERT σ (critical path)", f"{project_sigma:.2f} {time_unit}")
+    with p3:
+        st.metric("Approx P80 completion", f"{approx_p80:.2f} {time_unit}")
+
+    st.caption(
+        "PERT uses expected duration per task: (Optimistic + 4×MostLikely + Pessimistic) / 6. "
+        "Approx P80 shown using normal approximation on summed critical-path variance."
+    )
+    st.dataframe(
+        pert_input[
+            [
+                "task_id",
+                "task_name",
+                "duration",
+                "optimistic_duration",
+                "most_likely_duration",
+                "pessimistic_duration",
+                "pert_expected_duration",
+                "pert_variance",
+            ]
+        ],
+        use_container_width=True,
+    )
+
+    st.subheader("Resource planning")
+    default_capacity = max(1, int(df["resource_count"].max()))
+    max_capacity = max(default_capacity, int(df["resource_count"].sum()))
+    capacity = st.slider("Available resource capacity per time unit", 1, max_capacity, default_capacity)
+    planning_mode = st.radio(
+        "Planning mode",
+        options=["Resource levelling", "Resource smoothing"],
+        horizontal=True,
+    )
+
+    if planning_mode == "Resource levelling":
+        leveled_df, usage_df = level_resources(df, cpm_df, resource_capacity=capacity)
+        lsum = leveling_summary(leveled_df)
+        l1, l2, l3, l4 = st.columns(4)
+        with l1:
+            st.metric("CPM completion", f"{lsum['cpm_completion']:.2f} {time_unit}")
+        with l2:
+            st.metric("Leveled completion", f"{lsum['leveled_completion']:.2f} {time_unit}")
+        with l3:
+            st.metric("Leveling delay", f"{lsum['resource_leveling_delay']:.2f} {time_unit}")
+        with l4:
+            st.metric("Avg start shift", f"{lsum['avg_start_shift']:.2f} {time_unit}")
+
+        st.plotly_chart(
+            px.line(
+                usage_df,
+                x="time",
+                y=["used_resources", "capacity"],
+                title="Resource usage vs capacity (levelling)",
+            ),
+            use_container_width=True,
+        )
+        st.plotly_chart(
+            plot_resource_leveling_square_flow(
+                df,
+                leveled_df,
+                time_unit=time_unit,
+                show_original=False,
+                mode_label="Resource levelling",
+                start_col="leveled_start",
+                finish_col="leveled_finish",
+            ),
+            use_container_width=True,
+        )
+        st.dataframe(
+            leveled_df[
+                [
+                    "task_id",
+                    "task_name",
+                    "resource_count",
+                    "ES",
+                    "EF",
+                    "leveled_start",
+                    "leveled_finish",
+                    "start_shift_vs_cpm",
+                    "finish_shift_vs_cpm",
+                ]
+            ],
+            use_container_width=True,
+        )
+    else:
+        smoothed_df, usage_df = smooth_resources(df, cpm_df, resource_capacity=capacity)
+        ssum = smoothing_summary(smoothed_df)
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            st.metric("CPM completion", f"{ssum['cpm_completion']:.2f} {time_unit}")
+        with s2:
+            st.metric("Smoothed completion", f"{ssum['smoothed_completion']:.2f} {time_unit}")
+        with s3:
+            st.metric("Completion change", f"{ssum['completion_change']:.2f} {time_unit}")
+        with s4:
+            st.metric("Avg start shift", f"{ssum['avg_start_shift']:.2f} {time_unit}")
+
+        st.caption("Resource smoothing mode shown separately (no comparison diagram).")
+        st.plotly_chart(
+            px.line(
+                usage_df,
+                x="time",
+                y=["used_resources", "capacity"],
+                title="Resource usage vs capacity (smoothing)",
+            ),
+            use_container_width=True,
+        )
+        st.plotly_chart(
+            plot_resource_leveling_square_flow(
+                df,
+                smoothed_df,
+                time_unit=time_unit,
+                show_original=False,
+                mode_label="Resource smoothing",
+                start_col="smooth_start",
+                finish_col="smooth_finish",
+            ),
+            use_container_width=True,
+        )
+        st.dataframe(
+            smoothed_df[
+                [
+                    "task_id",
+                    "task_name",
+                    "resource_count",
+                    "ES",
+                    "EF",
+                    "smooth_start",
+                    "smooth_finish",
+                    "start_shift_vs_cpm",
+                    "finish_shift_vs_cpm",
+                ]
+            ],
+            use_container_width=True,
+        )
 
     st.subheader("Features, risk scores & AI delay probability")
     st.caption(
