@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CPM — Graph &amp; delay risk</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <header class="hero">
+      <h1>Critical path &amp; delay analysis</h1>
+      <p class="lede">
+        Upload a project CSV (task_id, task_name, duration, dependencies, resource_count,
+        task_type). The server runs CPM, scores risk, and estimates delay probability when
+        <code>ai/model.pkl</code> is present.
+      </p>
+    </header>
+
+    <section class="panel">
+      <form id="upload-form" class="form-row">
+        <label class="file-label">
+          <span>CSV file</span>
+          <input id="file" name="file" type="file" accept=".csv" required />
+        </label>
+        <label>
+          High-risk threshold
+          <input id="threshold" name="threshold" type="number" min="0" max="2" step="0.1" value="1" />
+        </label>
+        <button type="submit" id="submit">Analyze</button>
+      </form>
+      <p id="status" class="status" aria-live="polite"></p>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="metrics">
+        <div class="metric">
+          <span class="metric-label">Project completion (max EF)</span>
+          <span id="metric-ef" class="metric-value">—</span>
+        </div>
+        <div class="metric metric-wide">
+          <span class="metric-label">Critical path</span>
+          <span id="metric-cp" class="metric-value mono">—</span>
+        </div>
+      </div>
+
+      <div id="warnings" class="warnings hidden"></div>
+
+      <h2>Dependency graph</h2>
+      <div id="chart-dag" class="chart"></div>
+
+      <h2>Timeline (Gantt)</h2>
+      <div id="chart-gantt" class="chart"></div>
+
+      <h2>Delay probability by task</h2>
+      <div id="chart-risk" class="chart"></div>
+
+      <h2>CPM schedule</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="table-cpm">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h2>Risk scores &amp; delay probability</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="table-scored">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h2>Explain delay drivers</h2>
+      <label class="inline">
+        Task
+        <select id="task-select"></select>
+      </label>
+      <div id="chart-explain" class="chart"></div>
+
+      <h2>Structured insights (JSON)</h2>
+      <pre id="json-insights" class="json-block"></pre>
+    </section>
+  </body>
+</html>

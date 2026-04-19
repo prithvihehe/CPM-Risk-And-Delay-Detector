@@ -7,25 +7,9 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from cpm import (
-    REQUIRED_COLUMNS,
-    build_dag,
-    build_feature_frame,
-    compute_cpm,
-    critical_path_task_ids,
-    validate_dependency_references,
-)
-from ai.explain import (
-    explain_task,
-    format_reasons_line,
-    load_feature_importances,
-    summarize_delay_risk,
-)
-from ai.predict import DelayPredictor
-from risk import add_risk_scores, high_risk_mask
+from analysis import run_analysis
+from cpm import REQUIRED_COLUMNS
 from visuals import plot_explanation, plot_gantt, plot_risk, risk_tier
-
-AI_FEATURES = ["duration", "resource_count", "is_critical", "slack"]
 
 
 def _valid_delay_probability(p: object) -> bool:
@@ -34,11 +18,6 @@ def _valid_delay_probability(p: object) -> bool:
     if isinstance(p, float) and pd.isna(p):
         return False
     return True
-
-
-def validate_df(df: pd.DataFrame) -> list[str]:
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    return missing
 
 
 def style_high_risk(df: pd.DataFrame, mask: pd.Series) -> "pd.io.formats.style.Styler":
@@ -73,94 +52,47 @@ def main() -> None:
         st.error(f"Could not read CSV: {e}")
         return
 
-    miss = validate_df(df)
-    if miss:
-        st.error(f"Missing required columns: {', '.join(miss)}")
+    result = run_analysis(df, risk_threshold=threshold)
+    if not result.ok:
+        if result.missing_columns:
+            st.error(f"Missing required columns: {', '.join(result.missing_columns)}")
+            return
+        if result.dependency_errors:
+            for msg in result.dependency_errors[:20]:
+                st.error(msg)
+            if len(result.dependency_errors) > 20:
+                st.error(f"... and {len(result.dependency_errors) - 20} more dependency errors.")
+            return
+        st.error(result.message or "Analysis failed.")
         return
 
-    dep_errors = validate_dependency_references(df)
-    if dep_errors:
-        for msg in dep_errors[:20]:
-            st.error(msg)
-        if len(dep_errors) > 20:
-            st.error(f"... and {len(dep_errors) - 20} more dependency errors.")
-        return
+    assert result.scored is not None
+    assert result.cpm_df is not None
+    assert result.high_risk_mask is not None
+
+    scored = result.scored
+    cpm_df = result.cpm_df
+    hr = result.high_risk_mask
+    task_insights = result.task_insights
+    tasks = result.tasks
+
+    for w in result.warnings:
+        st.warning(w)
 
     st.subheader("Uploaded data")
     st.dataframe(df, use_container_width=True)
 
-    try:
-        g = build_dag(df)
-        cpm_df = compute_cpm(df, g)
-    except ValueError as e:
-        st.error(str(e))
-        return
-
-    cp_path = critical_path_task_ids(df, cpm_df)
-    features = build_feature_frame(df, cpm_df)
-    scored = add_risk_scores(features)
-
-    try:
-        predictor = DelayPredictor()
-        scored["delay_probability"] = predictor.predict_batch(scored[AI_FEATURES])
-    except FileNotFoundError as e:
-        st.warning(str(e))
-        scored["delay_probability"] = float("nan")
-
-    importance_error: str | None = None
-    try:
-        feature_importances = load_feature_importances()
-    except FileNotFoundError as e:
-        feature_importances = None
-        importance_error = str(e)
-
-    task_insights: list[dict] = []
-    explain_lines: list[str] = []
-    summaries: list[str] = []
-
-    for _, row in scored.iterrows():
-        tid = row["task_id"]
-        dp = row["delay_probability"]
-        if feature_importances is not None:
-            reasons = explain_task(
-                float(row["duration"]),
-                int(row["resource_count"]),
-                bool(row["is_critical"]),
-                float(row["slack"]),
-                importances=feature_importances,
-            )
-            explain_lines.append(format_reasons_line(reasons))
-            if pd.isna(dp):
-                summaries.append("Delay probability unavailable.")
-            else:
-                summaries.append(summarize_delay_risk(float(dp), reasons))
-        else:
-            reasons = []
-            explain_lines.append("—")
-            summaries.append(
-                importance_error or "Explanations unavailable (missing feature importances)."
-            )
-
-        task_insights.append(
-            {
-                "task_id": tid,
-                "delay_probability": float(dp) if pd.notna(dp) else None,
-                "reasons": [(r, float(w)) for r, w in reasons],
-            }
-        )
-
-    scored["delay_explanation"] = explain_lines
-    scored["delay_summary"] = summaries
-
-    hr = high_risk_mask(scored["risk_score"], threshold=threshold)
-
     st.subheader("CPM results")
     c1, c2 = st.columns(2)
     with c1:
-        st.metric("Project completion (max EF)", f"{cpm_df['EF'].max():.2f}")
+        st.metric("Project completion (max EF)", f"{result.project_completion:.2f}")
     with c2:
         st.write("**Critical path (ordered):**")
-        st.write(" → ".join(str(x) for x in cp_path) if cp_path else "(none)")
+        st.write(
+            " → ".join(str(x) for x in result.critical_path)
+            if result.critical_path
+            else "(none)"
+        )
 
     st.dataframe(
         cpm_df.merge(df[["task_id", "task_name"]], on="task_id", how="left"),
@@ -172,10 +104,14 @@ def main() -> None:
         "delay_probability comes from a RandomForest trained offline (see ai/). "
         "The app does not retrain the model."
     )
-    if importance_error:
-        st.warning(importance_error)
+    if result.importance_error:
+        st.warning(result.importance_error)
 
-    base_display = [c for c in scored.columns if c not in ("delay_probability", "delay_explanation", "delay_summary")]
+    base_display = [
+        c
+        for c in scored.columns
+        if c not in ("delay_probability", "delay_explanation", "delay_summary")
+    ]
     display_cols = base_display + ["delay_probability", "delay_explanation", "delay_summary"]
     st.dataframe(
         style_high_risk(scored[display_cols], hr),
@@ -196,17 +132,6 @@ def main() -> None:
     with st.expander("Structured explanation (JSON per task)", expanded=False):
         st.json(task_insights)
 
-    tasks: list[dict] = []
-    for (_, row), ins in zip(scored.iterrows(), task_insights):
-        tasks.append(
-            {
-                "id": row["task_id"],
-                "name": row["task_name"],
-                "delay_probability": ins["delay_probability"],
-                "reasons": ins["reasons"],
-            }
-        )
-
     ES = cpm_df.set_index("task_id")["ES"].to_dict()
     EF = cpm_df.set_index("task_id")["EF"].to_dict()
     critical = cpm_df.set_index("task_id")["is_critical"].to_dict()
@@ -218,7 +143,10 @@ def main() -> None:
     )
 
     st.subheader("Task Risk Levels")
-    st.plotly_chart(plot_risk(tasks), use_container_width=True)
+    st.plotly_chart(
+        plot_risk(tasks),
+        use_container_width=True,
+    )
 
     st.subheader("Top 5 risky tasks (by delay probability)")
     top5 = sorted(

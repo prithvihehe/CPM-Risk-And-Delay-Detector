@@ -1,5 +1,9 @@
-task_id,task_name,duration,dependencies,resource_count,task_type
-1,Design,3,,1,dev
-2,Build,5,1,3,dev
-3,Test,2,2,2,qa
-4,Deploy,1,"2,3",1,ops
+﻿task_id,task_name,duration,dependencies,resource_count,task_type
+1,Kickoff,2,,1,milestone
+2,BranchA,4,1,3,dev
+3,BranchB,3,1,2,dev
+4,Integration,5,"2,3",4,dev
+5,Milestone,1,4,1,milestone
+6,Audit,3,5,2,qa
+7,Signoff,1,6,1,ops
+8,SideTask,2.5,1,1,dev
